@@ -43,7 +43,7 @@ class MLP(nn.Module):
 
 
 class QKVMultiheadAttention(nn.Module):
-    def __init__(self, n_heads: int, n_ctx: int):
+    def __init__(self, n_heads: int, n_ctx: int = 0):
         super().__init__()
         self.n_heads = n_heads
         self.n_ctx = n_ctx
