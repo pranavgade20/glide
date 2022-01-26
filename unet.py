@@ -19,14 +19,15 @@ class ResidualBlock(nn.Module):
         channels in the skip connection.
     :param dims: determines if the signal is 1D, 2D, or 3D.
     """
+
     def __init__(
-        self,
-        in_channels,
-        emb_channels,
-        out_channels,
-        use_conv=False,
-        use_scale_shift_norm=False,
-        dropout=0.0,
+            self,
+            in_channels,
+            emb_channels,
+            out_channels,
+            use_conv=False,
+            use_scale_shift_norm=False,
+            dropout=0.0,
     ):
         super().__init__()
         assert out_channels is None
@@ -47,8 +48,8 @@ class ResidualBlock(nn.Module):
             nn.SiLU(),
             nn.Linear(
                 emb_channels,
-                2*self.out_channels if self.use_scale_shift_norm else self.out_channels
-                ),
+                2 * self.out_channels if self.use_scale_shift_norm else self.out_channels
+            ),
         )
 
         self.out_layers = nn.Sequential(
@@ -67,7 +68,7 @@ class ResidualBlock(nn.Module):
         """
         h = self.in_layers(x)
 
-        emb_out = self.emb_layers(emb)[:,:,None,None]
+        emb_out = self.emb_layers(emb)[:, :, None, None]
         if self.use_scale_shift_norm:
             scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = h * (1 + scale) + shift
@@ -77,13 +78,18 @@ class ResidualBlock(nn.Module):
 
         return x + h
 
+
 class UpResidualBlock(ResidualBlock):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.skip_connection = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=(1, 1))
+
     def forward(self, x, emb):
-        h = self.in_layers[0](x) # First group norm
+        h = self.in_layers[0](x)  # First group norm
         h = F.interpolate(h, scale_factor=2, mode="nearest")
         h = self.in_layers[1:](h)
 
-        emb_out = self.emb_layers(emb)[:,:,None,None]
+        emb_out = self.emb_layers(emb)[:, :, None, None]
         if self.use_scale_shift_norm:
             scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = h * (1 + scale) + shift
@@ -92,16 +98,20 @@ class UpResidualBlock(ResidualBlock):
         h = self.out_layers(h)
 
         x = F.interpolate(x, scale_factor=2, mode="nearest")
-        return x + h
+        return self.skip_connection(x) + h
 
 
 class DownResidualBlock(ResidualBlock):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.skip_connection = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=(1, 1))
+
     def forward(self, x, emb):
-        h = self.in_layers[0](x) # First group norm
+        h = self.in_layers[0](x)  # First group norm
         h = F.avg_pool2d(h, kernel_size=(1, 2, 2))
         h = self.in_layers[1:](h)
 
-        emb_out = self.emb_layers(emb)[:,:,None,None]
+        emb_out = self.emb_layers(emb)[:, :, None, None]
         if self.use_scale_shift_norm:
             scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = h * (1 + scale) + shift
@@ -110,7 +120,7 @@ class DownResidualBlock(ResidualBlock):
         h = self.out_layers(h)
 
         x = F.avg_pool2d(x, kernel_size=(1, 2, 2))
-        return x + h
+        return self.skip_connection(x) + h
 
 
 from transformer import QKVMultiheadAttention
@@ -167,6 +177,7 @@ class AttentionBlock(nn.Module):
         y = self.proj_out(y)
         return x + y.reshape(x.shape)
 
+
 class UNetModel(nn.Module):
     """
     The full UNet model with attention and timestep embedding.
@@ -197,23 +208,23 @@ class UNetModel(nn.Module):
     """
 
     def __init__(
-        self,
-        in_channels,
-        model_channels,
-        out_channels,
-        num_res_blocks,
-        attention_resolutions,
-        dropout=0,
-        channel_mult=(1, 2, 4, 8),
-        conv_resample=True,
-        num_classes=None,
-        use_checkpoint=False,
-        num_heads=1,
-        num_head_channels=-1,
-        num_heads_upsample=-1,
-        use_scale_shift_norm=False,
-        resblock_updown=False,
-        encoder_channels=None,
+            self,
+            in_channels,
+            model_channels,
+            out_channels,
+            num_res_blocks,
+            attention_resolutions,
+            dropout=0,
+            channel_mult=(1, 2, 4, 8),
+            conv_resample=True,
+            num_classes=None,
+            use_checkpoint=False,
+            num_heads=1,
+            num_head_channels=-1,
+            num_heads_upsample=-1,
+            use_scale_shift_norm=False,
+            resblock_updown=False,
+            encoder_channels=None,
     ):
         super().__init__()
 
@@ -248,7 +259,7 @@ class UNetModel(nn.Module):
         )
 
         input_block_channels = [current_channels]
-        ds = 1 #???
+        ds = 1  # ???
         for level, mult in enumerate(channel_mult):
             current_channels, next_channels = next_channels, int(mult * model_channels)
             for _ in range(num_res_blocks):
@@ -257,15 +268,7 @@ class UNetModel(nn.Module):
                         current_channels,
                         time_embed_dim,
                         dropout=dropout,
-                        out_channels = next_channels,
-                        use_scale_shift_norm = use_scale_shift_norm
+                        out_channels=next_channels,
+                        use_scale_shift_norm=use_scale_shift_norm
                     )
                 ]
-
-
-
-
-
-
-
-
