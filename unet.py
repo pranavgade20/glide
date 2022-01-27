@@ -24,15 +24,14 @@ class ResidualBlock(nn.Module):
     def __init__(
             self,
             in_channels,
-            emb_channels,
             out_channels,
+            attn,
+            emb_channels=768,
             use_conv=False,
             use_scale_shift_norm=True,
             dropout=0.0,
-            attn=True,
     ):
         super().__init__()
-        assert out_channels is None
         self.in_channels = in_channels
         self.emb_channels = emb_channels
         self.dropout = dropout
@@ -62,21 +61,21 @@ class ResidualBlock(nn.Module):
 
         self.attn = attn
         if self.attn:
-            self.attention_layer = AttentionBlock(out_channels)
+            self.attention_layer = AttentionBlock(channels=out_channels, num_head_channels=64, encoder_channels=512)
 
 
 
-    def forward(self, x, emb):
+    def forward(self, x, time_emb, text_emb):
         """
         Apply the block to a Tensor, conditioned on a timestep embedding.
 
         :param x: an [N x C x ...] Tensor of features.
-        :param emb: an [N x emb_channels] Tensor of timestep embeddings.
+        :param time_emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
         h = self.in_layers(x)
 
-        emb_out = self.emb_layers(emb)[:, :, None, None]
+        emb_out = self.emb_layers(time_emb)[:, :, None, None]
         if self.use_scale_shift_norm:
             scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = h * (1 + scale) + shift
@@ -86,8 +85,7 @@ class ResidualBlock(nn.Module):
         ret = x + h
 
         if self.attn is True:
-            ret = self.attention_layer(ret)
-            assert False, 'Make sure emb is integrated into attn'
+            ret = self.attention_layer(ret, text_emb)
 
         return ret
 
@@ -97,12 +95,12 @@ class UpResidualBlock(ResidualBlock):
         super().__init__(*args, **kwargs)
         self.skip_connection = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=(1, 1))
 
-    def forward(self, x, emb):
+    def forward(self, x, time_emb, text_emb=None):
         h = self.in_layers[0](x)  # First group norm
         h = F.interpolate(h, scale_factor=2, mode="nearest")
         h = self.in_layers[1:](h)
 
-        emb_out = self.emb_layers(emb)[:, :, None, None]
+        emb_out = self.emb_layers(time_emb)[:, :, None, None]
         if self.use_scale_shift_norm:
             scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = h * (1 + scale) + shift
@@ -119,12 +117,12 @@ class DownResidualBlock(ResidualBlock):
         super().__init__(*args, **kwargs)
         self.skip_connection = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=(1, 1))
 
-    def forward(self, x, emb):
+    def forward(self, x, time_emb, text_emb=None):
         h = self.in_layers[0](x)  # First group norm
         h = F.avg_pool2d(h, kernel_size=(1, 2, 2))
         h = self.in_layers[1:](h)
 
-        emb_out = self.emb_layers(emb)[:, :, None, None]
+        emb_out = self.emb_layers(time_emb)[:, :, None, None]
         if self.use_scale_shift_norm:
             scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = h * (1 + scale) + shift
@@ -166,7 +164,7 @@ class AttentionBlock(nn.Module):
             channels,
             num_heads=1,
             num_head_channels=-1,
-            encoder_channels=None,  # int
+            encoder_channels=512,  # int
     ):
         super().__init__()
         self.channels = channels
