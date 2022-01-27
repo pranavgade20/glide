@@ -1,7 +1,5 @@
 import copy
 
-import torch.nn as nn
-
 from unet import *
 
 in_channels = 3
@@ -37,15 +35,6 @@ def create_model_from_arch(architecture):
             ret.append(DownResidualBlock(**block_dict))
         else:
             ret.append(ResidualBlock(**block_dict))
-        # attn = block_dict.get('attn', True)
-        # change_size = block_dict.get("change_size", False)
-        # in_channels = block_dict['in_channels']
-        # out_channels = block_dict['out_channels']
-        # assert not (attn and change_size)
-        # if change_size is True:
-        #     ret.append(DownResidualBlock(in_channels, text_emb_channels, out_channels))
-        # else:
-        #     ret.append(ResidualBlock(in_channels, text_emb_channels, out_channels, attn=attn))
 
     num_middle_channels = architecture[-1]["out_channels"]
 
@@ -53,6 +42,24 @@ def create_model_from_arch(architecture):
     ret.append(AttentionBlock(channels=num_middle_channels, num_head_channels=64, encoder_channels=512))
     ret.append(ResidualBlock(num_middle_channels, num_middle_channels, False))
 
+    out_arch = [{
+        'in_channels': d['out_channels'],
+        'out_channels': d['in_channels'],
+        'attn': d['attn'],
+        'change_size': 'change_size' in d and d['change_size']
+    } for d in reversed(architecture)]
 
+    out_arch.insert(0, out_arch[0])
+
+    for block_dict in out_arch:
+        if block_dict.pop('change_size', False):
+            ret.append(UpResidualBlock(**block_dict))
+        else:
+            ret.append(ResidualBlock(**block_dict))
 
     return ret
+
+if __name__ == '__main__':
+    arch = create_model_from_arch(in_arch)
+    model = nn.Sequential(*arch)
+    print(model)
