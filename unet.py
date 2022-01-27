@@ -1,10 +1,11 @@
+import copy
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # import torch.optim as optim
-
+import transformer
 
 
 class ResidualBlock(nn.Module):
@@ -177,7 +178,7 @@ class AttentionBlock(nn.Module):
         self.qkv = nn.Conv1d(channels, channels * 3, 1)
         self.attention = QKVAttention(self.num_heads)
         if encoder_channels:
-            self.encoder_kv = nn.Conv1d(channels, channels * 2, 1)
+            self.encoder_kv = nn.Conv1d(encoder_channels, channels * 2, 1)
         self.proj_out = nn.Conv1d(channels, channels, 1)
 
     def forward(self, x, encoder_out=None):
@@ -220,43 +221,10 @@ class UNetModel(nn.Module):
 
     def __init__(
             self,
-            in_channels,
-            model_channels,
-            out_channels,
-            num_res_blocks,
-            attention_resolutions,
-            dropout=0,
-            channel_mult=(1, 2, 4, 8),
-            conv_resample=True,
-            num_classes=None,
-            use_checkpoint=False,
-            num_heads=1,
-            num_head_channels=-1,
-            num_heads_upsample=-1,
-            use_scale_shift_norm=False,
-            resblock_updown=False,
-            encoder_channels=None,
+            model_channels=192,
     ):
         super().__init__()
-
-        if num_heads_upsample == -1:
-            num_heads_upsample = num_heads
-
-        self.in_channels = in_channels
         self.model_channels = model_channels
-        self.out_channels = out_channels
-        self.num_res_blocks = num_res_blocks
-        self.attention_resolutions = attention_resolutions
-        self.dropout = dropout
-        self.channel_mult = channel_mult
-        self.conv_resample = conv_resample
-        self.num_classes = num_classes
-        self.use_checkpoint = use_checkpoint
-        self.dtype = torch.float32
-        self.num_heads = num_heads
-        self.num_head_channels = num_head_channels
-        self.num_heads_upsample = num_heads_upsample
-
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
             nn.Linear(model_channels, time_embed_dim),
@@ -264,22 +232,89 @@ class UNetModel(nn.Module):
             nn.Linear(time_embed_dim, time_embed_dim),
         )
 
-        next_channels = current_channels = int(channel_mult[0] * model_channels)
-        self.input_blocks = nn.ModuleList(
-            [nn.Conv2d(current_channels, next_channels, kernel_size=3, padding=1)]
+        def create_model_from_arch(architecture):
+            in_layers = [nn.Conv2d(3, model_channels, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))]
+            stack = [model_channels]
+
+            arch_cp = copy.deepcopy(architecture)
+            for block_dict in arch_cp:
+                if block_dict.pop('change_size', False):
+                    in_layers.append(DownResidualBlock(**block_dict))
+                else:
+                    in_layers.append(ResidualBlock(**block_dict))
+
+            stack += [d['out_channels'] for d in arch_cp]
+
+            num_middle_channels = architecture[-1]["out_channels"]
+            middle_layers = []
+            middle_layers.append(ResidualBlock(num_middle_channels, num_middle_channels, False))
+            middle_layers.append(AttentionBlock(channels=num_middle_channels, num_head_channels=64, encoder_channels=512))
+            middle_layers.append(ResidualBlock(num_middle_channels, num_middle_channels, False))
+
+            out_arch = [{
+                'in_channels': d['out_channels'],
+                'out_channels': d['in_channels'],
+                'attn': d['attn'],
+                'change_size': 'change_size' in d and d['change_size']
+            } for d in reversed(architecture)]
+
+            out_arch.insert(0, out_arch[0])
+            out_layers = []
+            for block_dict in out_arch:
+                block_dict["in_channels"] += stack.pop()
+                if block_dict.pop('change_size', False):
+                    out_layers.append(UpResidualBlock(**block_dict))
+                else:
+                    out_layers.append(ResidualBlock(**block_dict))
+
+            return in_layers, middle_layers, out_layers
+
+        in_arch = [
+            {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
+            {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
+            {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
+            {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False, 'change_size': True},
+            {'in_channels': model_channels, 'out_channels': 2 * model_channels, 'attn': True},
+            {'in_channels': 2 * model_channels, 'out_channels': 2 * model_channels, 'attn': True},
+            {'in_channels': 2 * model_channels, 'out_channels': 2 * model_channels, 'attn': True},
+            {'in_channels': 2 * model_channels, 'out_channels': 2 * model_channels, 'attn': False, 'change_size': True},
+            {'in_channels': 2 * model_channels, 'out_channels': 3 * model_channels, 'attn': True},
+            {'in_channels': 3 * model_channels, 'out_channels': 3 * model_channels, 'attn': True},
+            {'in_channels': 3 * model_channels, 'out_channels': 3 * model_channels, 'attn': True},
+            {'in_channels': 3 * model_channels, 'out_channels': 3 * model_channels, 'attn': False, 'change_size': True},
+            {'in_channels': 3 * model_channels, 'out_channels': 4 * model_channels, 'attn': True},
+            {'in_channels': 4 * model_channels, 'out_channels': 4 * model_channels, 'attn': True},
+            {'in_channels': 4 * model_channels, 'out_channels': 4 * model_channels, 'attn': True},
+        ]
+
+        in_layers, middle_layers, out_layers = create_model_from_arch(in_arch)
+
+        self.in_layers = nn.Sequential(*in_layers)
+        self.middle_layers = nn.Sequential(*middle_layers)
+        self.out_layers = nn.Sequential(*out_layers)
+
+        self.out = nn.Sequential(
+            nn.GroupNorm(num_groups=32, num_channels=model_channels),
+            nn.Conv2d(model_channels, 6, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
         )
 
-        input_block_channels = [current_channels]
-        ds = 1  # ???
-        for level, mult in enumerate(channel_mult):
-            current_channels, next_channels = next_channels, int(mult * model_channels)
-            for _ in range(num_res_blocks):
-                layers = [
-                    ResidualBlock(
-                        current_channels,
-                        time_embed_dim,
-                        dropout=dropout,
-                        out_channels=next_channels,
-                        use_scale_shift_norm=use_scale_shift_norm
-                    )
-                ]
+class Text2Im(UNetModel):
+    def __init__(
+            self,
+            tokenizer,
+            text_ctx=128,
+            xf_width=512,
+            xf_layers=16,
+            xf_heads=8,
+            xf_final_ln=True,
+            xf_padding=True,
+    ):
+        super(Text2Im, self).__init__()
+        self.tokenizer = tokenizer
+        self.transformer = transformer.Transformer(
+            text_ctx, xf_width, xf_layers, xf_heads
+        )
+
+        self.final_ln = nn.LayerNorm(xf_width)
+        self.token_embedding = nn.Embedding(self.tokenizer.n_vocab, xf_width)
+        self.transformer_proj = nn.Linear(xf_width, 4 * self.model_channels)
