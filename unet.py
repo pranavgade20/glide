@@ -3,7 +3,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
+# import torch.optim as optim
+
 
 
 class ResidualBlock(nn.Module):
@@ -26,8 +27,9 @@ class ResidualBlock(nn.Module):
             emb_channels,
             out_channels,
             use_conv=False,
-            use_scale_shift_norm=False,
+            use_scale_shift_norm=True,
             dropout=0.0,
+            attn=True,
     ):
         super().__init__()
         assert out_channels is None
@@ -58,6 +60,12 @@ class ResidualBlock(nn.Module):
             nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1),
         )
 
+        self.attn = attn
+        if self.attn:
+            self.attention_layer = AttentionBlock(out_channels)
+
+
+
     def forward(self, x, emb):
         """
         Apply the block to a Tensor, conditioned on a timestep embedding.
@@ -75,8 +83,13 @@ class ResidualBlock(nn.Module):
         else:
             h = h + emb_out
         h = self.out_layers(h)
+        ret = x + h
 
-        return x + h
+        if self.attn is True:
+            ret = self.attention_layer(ret)
+            assert False, 'Make sure emb is integrated into attn'
+
+        return ret
 
 
 class UpResidualBlock(ResidualBlock):
@@ -153,7 +166,7 @@ class AttentionBlock(nn.Module):
             channels,
             num_heads=1,
             num_head_channels=-1,
-            encoder_channels=None,
+            encoder_channels=None,  # int
     ):
         super().__init__()
         self.channels = channels
