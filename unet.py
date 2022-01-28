@@ -44,7 +44,6 @@ class ResidualBlock(nn.Module):
             nn.GroupNorm(num_groups=32, num_channels=self.in_channels, eps=1e-5),
             nn.SiLU(),
             nn.Conv2d(self.in_channels, self.out_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups=32, num_channels=self.out_channels, eps=1e-5),
         )
         self.emb_layers = nn.Sequential(
             nn.SiLU(),
@@ -53,13 +52,15 @@ class ResidualBlock(nn.Module):
                 2 * self.out_channels if self.use_scale_shift_norm else self.out_channels
             ),
         )
-
+        self.group_norm = nn.GroupNorm(num_groups=32, num_channels=self.out_channels, eps=1e-5)
         self.out_layers = nn.Sequential(
             nn.SiLU(),
             nn.Dropout(self.dropout),
             nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1),
         )
 
+        if self.in_channels != self.out_channels:
+            self.skip_connection = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=(1, 1))
         self.attn = attn
         if self.attn:
             self.attention_layer = AttentionBlock(channels=out_channels, num_head_channels=64, encoder_channels=512)
@@ -74,7 +75,7 @@ class ResidualBlock(nn.Module):
         :param time_emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        h = self.in_layers(x)
+        h = self.group_norm(self.in_layers(x))
 
         emb_out = self.emb_layers(time_emb)[:, :, None, None]
         if self.use_scale_shift_norm:
@@ -83,6 +84,8 @@ class ResidualBlock(nn.Module):
         else:
             h = h + emb_out
         h = self.out_layers(h)
+        if self.in_channels != self.out_channels:
+            x = self.skip_connection(x)
         ret = x + h
 
         if self.attn is True:
@@ -92,14 +95,10 @@ class ResidualBlock(nn.Module):
 
 
 class UpResidualBlock(ResidualBlock):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.skip_connection = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=(1, 1))
-
     def forward(self, x, time_emb, text_emb=None):
         h = self.in_layers[0](x)  # First group norm
         h = F.interpolate(h, scale_factor=2, mode="nearest")
-        h = self.in_layers[1:](h)
+        h = self.group_norm(self.in_layers[1:](h))
 
         emb_out = self.emb_layers(time_emb)[:, :, None, None]
         if self.use_scale_shift_norm:
@@ -114,14 +113,10 @@ class UpResidualBlock(ResidualBlock):
 
 
 class DownResidualBlock(ResidualBlock):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.skip_connection = nn.Conv2d(self.in_channels, self.out_channels, kernel_size=(1, 1))
-
     def forward(self, x, time_emb, text_emb=None):
         h = self.in_layers[0](x)  # First group norm
         h = F.avg_pool2d(h, kernel_size=(1, 2, 2))
-        h = self.in_layers[1:](h)
+        h = self.group_norm(self.in_layers[1:](h))
 
         emb_out = self.emb_layers(time_emb)[:, :, None, None]
         if self.use_scale_shift_norm:
@@ -254,16 +249,21 @@ class UNetModel(nn.Module):
             out_arch = [{
                 'in_channels': d['out_channels'],
                 'out_channels': d['in_channels'],
-                'attn': d['attn'],
+                'attn': d['attn'] or (i < 10),
                 'change_size': 'change_size' in d and d['change_size']
-            } for d in reversed(architecture)]
+            } for i, d in enumerate(reversed(architecture))]
 
-            out_arch.insert(0, out_arch[0])
+            out_arch.insert(0, copy.deepcopy(out_arch[0]))
             out_layers = []
             for block_dict in out_arch:
                 block_dict["in_channels"] += stack.pop()
+                print(block_dict["in_channels"])
                 if block_dict.pop('change_size', False):
-                    out_layers.append(UpResidualBlock(**block_dict))
+                    a = [ResidualBlock(**block_dict)]
+                    block_dict["in_channels"] = block_dict["out_channels"]
+                    block_dict["attn"] = False
+                    a.append(UpResidualBlock(**block_dict))
+                    out_layers.append(nn.Sequential(*a))
                 else:
                     out_layers.append(ResidualBlock(**block_dict))
 
@@ -309,7 +309,9 @@ class Text2Im(UNetModel):
             xf_final_ln=True,
             xf_padding=True,
     ):
-        super(Text2Im, self).__init__()
+        super().__init__()
+        self.positional_embedding = nn.Parameter(torch.empty(text_ctx, xf_width, dtype=torch.float32))
+        self.padding_embedding = nn.Parameter(torch.empty(text_ctx, xf_width, dtype=torch.float32))
         self.tokenizer = tokenizer
         self.transformer = transformer.Transformer(
             text_ctx, xf_width, xf_layers, xf_heads

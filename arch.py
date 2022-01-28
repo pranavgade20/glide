@@ -2,9 +2,6 @@ import copy
 
 from unet import *
 
-in_channels = 3
-out_channels = 6
-time_emb_channels = 128
 in_arch = [
     {'in_channels': 192, 'out_channels': 192, 'attn': False},
     {'in_channels': 192, 'out_channels': 192, 'attn': False},
