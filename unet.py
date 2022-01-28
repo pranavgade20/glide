@@ -246,40 +246,6 @@ class UNetModel(nn.Module):
             middle_layers.append(AttentionBlock(channels=num_middle_channels, num_head_channels=64, encoder_channels=512))
             middle_layers.append(ResidualBlock(num_middle_channels, num_middle_channels, False))
 
-            # last_chans = arch_in[-1]["out_channels"]
-            # ds = 8
-            # chan_scale = 4
-            # for block in arch_in[::-1]:
-            #     change_size = block.get('change_size', False)
-            #     in_channels = last_chans + block['out_channels']
-            #     if not change_size:
-            #         out_layers.append(ResidualBlock(in_channels, 192*chan_scale, attn=(ds in [2, 4, 8])))
-            #         last_chans = 192*chan_scale
-            #     else:
-            #         out_layers.append(
-            #             nn.Sequential(
-            #                 ResidualBlock(in_channels, 192*chan_scale, attn=(ds in [2, 4, 8])),
-            #                 UpResidualBlock(192*chan_scale, 192*chan_scale, attn=False)
-            #             )
-            #         )
-            #         last_chans = 192*chan_scale
-            #         chan_scale -= 1
-            #         ds = ds // 2
-            #
-            # out_layers.extend([
-            #     ResidualBlock(192+last_chans, 192, attn=False),
-            #     nn.Conv2d(192, 6, kernel_size=(3,3), stride=(1,1), padding=(1,1)),
-            # ])
-
-
-
-            # out_arch = [{
-            #     'in_channels': d['out_channels'],
-            #     'out_channels': d['in_channels'],
-            #     'attn': d['attn'] or (i < 10),
-            #     'change_size': 'change_size' in d and d['change_size']
-            # } for i, d in enumerate(reversed(architecture))]
-        #
             out_layers = []
             for i, block_dict in enumerate(reversed(out_arch)):
                 block_dict["in_channels"] += stack.pop()
