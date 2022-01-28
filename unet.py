@@ -65,8 +65,6 @@ class ResidualBlock(nn.Module):
         if self.attn:
             self.attention_layer = AttentionBlock(channels=out_channels, num_head_channels=64, encoder_channels=512)
 
-
-
     def forward(self, x, time_emb, text_emb):
         """
         Apply the block to a Tensor, conditioned on a timestep embedding.
@@ -109,13 +107,15 @@ class UpResidualBlock(ResidualBlock):
         h = self.out_layers(h)
 
         x = F.interpolate(x, scale_factor=2, mode="nearest")
-        return self.skip_connection(x) + h
+        if self.in_channels != self.out_channels:
+            x = self.skip_connection(x)
+        return x + h
 
 
 class DownResidualBlock(ResidualBlock):
     def forward(self, x, time_emb, text_emb=None):
         h = self.in_layers[0](x)  # First group norm
-        h = F.avg_pool2d(h, kernel_size=(1, 2, 2))
+        h = F.avg_pool2d(h, kernel_size=2)
         h = self.group_norm(self.in_layers[1:](h))
 
         emb_out = self.emb_layers(time_emb)[:, :, None, None]
@@ -126,32 +126,37 @@ class DownResidualBlock(ResidualBlock):
             h = h + emb_out
         h = self.out_layers(h)
 
-        x = F.avg_pool2d(x, kernel_size=(1, 2, 2))
-        return self.skip_connection(x) + h
+        x = F.avg_pool2d(x, kernel_size=2)
+        if self.in_channels != self.out_channels:
+            x = self.skip_connection(x)
+        return x + h
 
 
 from transformer import QKVMultiheadAttention
 
 
-class QKVAttention(QKVMultiheadAttention):
+class QKVAttention(nn.Module):
+    def __init__(self, n_heads):
+        super().__init__()
+        self.n_heads = n_heads
+
     def forward(self, qkv, encoder_kv=None):
-        bs, n_ctx, width = qkv.shape
-        attn_ch = width // self.n_heads // 3
-        scale = 1 / math.sqrt(math.sqrt(attn_ch))
-        qkv = qkv.view(bs, n_ctx, self.n_heads, -1)
-        q, k, v = torch.split(qkv, attn_ch, dim=-1)
-        if encoder_kv:
-            assert encoder_kv.shape[1] == self.n_heads * attn_ch * 2
-            ek, ev = encoder_kv.reshape(bs * self.n_heads, attn_ch * 2, -1).split(attn_ch, dim=1)
+        bs, width, length = qkv.shape
+        assert width % (3 * self.n_heads) == 0
+        ch = width // (3 * self.n_heads)
+        q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
+        if encoder_kv is not None:
+            assert encoder_kv.shape[1] == self.n_heads * ch * 2
+            ek, ev = encoder_kv.reshape(bs * self.n_heads, ch * 2, -1).split(ch, dim=1)
             k = torch.cat([ek, k], dim=-1)
             v = torch.cat([ev, v], dim=-1)
-
+        scale = 1 / math.sqrt(math.sqrt(ch))
         weight = torch.einsum(
-            "bthc,bshc->bhts", q * scale, k * scale
+            "bct,bcs->bts", q * scale, k * scale
         )  # More stable with f16 than dividing afterwards
-        wdtype = weight.dtype
-        weight = torch.softmax(weight.float(), dim=-1).type(wdtype)
-        return torch.einsum("bhts,bshc->bthc", weight, v).reshape(bs, n_ctx, -1)
+        weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
+        a = torch.einsum("bts,bcs->bct", weight, v)
+        return a.reshape(bs, -1, length)
 
 
 class AttentionBlock(nn.Module):
@@ -178,7 +183,7 @@ class AttentionBlock(nn.Module):
 
     def forward(self, x, encoder_out=None):
         qkv = self.qkv(self.group_norm(x).reshape(x.shape[0], x.shape[1], -1))
-        if encoder_out:
+        if encoder_out is not None:
             encoder_out = self.encoder_kv(encoder_out)
         y = self.attention(qkv, encoder_out)
         y = self.proj_out(y)
@@ -228,7 +233,15 @@ class UNetModel(nn.Module):
         )
 
         def create_model_from_arch(arch_in, arch_out):
-            in_layers = [nn.Conv2d(3, model_channels, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))]
+            class Wrapper(nn.Module):
+                def __init__(self, module):
+                    super().__init__()
+                    self.module = module
+
+                def forward(self, x, *args):
+                    return self.module(x)
+
+            in_layers = [Wrapper(nn.Conv2d(3, model_channels, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)))]
             stack = [model_channels]
 
             arch_cp = copy.deepcopy(arch_in)
@@ -243,7 +256,8 @@ class UNetModel(nn.Module):
             num_middle_channels = arch_in[-1]["out_channels"]
             middle_layers = []
             middle_layers.append(ResidualBlock(num_middle_channels, num_middle_channels, False))
-            middle_layers.append(AttentionBlock(channels=num_middle_channels, num_head_channels=64, encoder_channels=512))
+            middle_layers.append(
+                Wrapper(AttentionBlock(channels=num_middle_channels, num_head_channels=64, encoder_channels=512)))
             middle_layers.append(ResidualBlock(num_middle_channels, num_middle_channels, False))
 
             out_layers = []
@@ -259,6 +273,7 @@ class UNetModel(nn.Module):
                     out_layers.append(ResidualBlock(**block_dict))
 
             return in_layers, middle_layers, out_layers
+
         #
         in_arch = [
             {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
@@ -308,6 +323,7 @@ class UNetModel(nn.Module):
             nn.Conv2d(model_channels, 6, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
         )
 
+
 class Text2Im(UNetModel):
     def __init__(
             self,
@@ -320,6 +336,13 @@ class Text2Im(UNetModel):
             xf_padding=True,
     ):
         super().__init__()
+        self.text_ctx = text_ctx
+        self.xf_width = xf_width
+        self.xf_layers = xf_layers
+        self.xf_heads = xf_heads
+        self.xf_final_ln = xf_final_ln
+        self.xf_padding = xf_padding
+
         self.positional_embedding = nn.Parameter(torch.empty(text_ctx, xf_width, dtype=torch.float32))
         self.padding_embedding = nn.Parameter(torch.empty(text_ctx, xf_width, dtype=torch.float32))
         self.tokenizer = tokenizer
@@ -330,3 +353,85 @@ class Text2Im(UNetModel):
         self.final_ln = nn.LayerNorm(xf_width)
         self.token_embedding = nn.Embedding(self.tokenizer.n_vocab, xf_width)
         self.transformer_proj = nn.Linear(xf_width, 4 * self.model_channels)
+
+        self.cache_text_emb = False
+        self.cache = None
+        self.dtype = torch.float32
+
+    def get_text_emb(self, tokens, mask):
+        """from https://github.com/openai/glide-text2im/blob/9cc8e563851bd38f5ddb3e305127192cb0f02f5c/glide_text2im/text2im_model.py#L89"""
+        assert tokens is not None
+
+        if self.cache_text_emb and self.cache is not None:
+            assert (
+                    tokens == self.cache["tokens"]
+            ).all(), f"Tokens {tokens.cpu().numpy().tolist()} do not match cache {self.cache['tokens'].cpu().numpy().tolist()}"
+            return self.cache
+
+        xf_in = self.token_embedding(tokens.long())
+        xf_in = xf_in + self.positional_embedding[None]
+        if self.xf_padding:
+            assert mask is not None
+            xf_in = torch.where(mask[..., None], xf_in, self.padding_embedding[None])
+        xf_out = self.transformer(xf_in.to(self.dtype))
+        if self.final_ln is not None:
+            xf_out = self.final_ln(xf_out)
+        xf_proj = self.transformer_proj(xf_out[:, -1])
+        xf_out = xf_out.permute(0, 2, 1)  # NLC -> NCL
+
+        outputs = dict(xf_proj=xf_proj, xf_out=xf_out)
+
+        if self.cache_text_emb:
+            self.cache = dict(
+                tokens=tokens,
+                xf_proj=xf_proj.detach(),
+                xf_out=xf_out.detach() if xf_out is not None else None,
+            )
+
+        return outputs
+
+    def forward(self, x, timesteps, tokens, mask):
+        hs = []
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        if self.xf_width:
+            text_outputs = self.get_text_emb(tokens, mask)
+            xf_proj, xf_out = text_outputs["xf_proj"], text_outputs["xf_out"]
+            emb = emb + xf_proj.to(emb)
+        else:
+            xf_out = None
+        h = x.type(self.dtype)
+        for module in self.in_layers:
+            h = module(h, emb, xf_out)
+            hs.append(h)
+
+        for module in self.middle_layers:
+            h = module(h, emb, xf_out)
+
+        for module in self.out_layers:
+            h = torch.cat([h, hs.pop()], dim=1)
+            if isinstance(module, nn.Sequential):
+                for l in module:
+                    h = l(h, emb, xf_out)
+            else:
+                h = module(h, emb, xf_out)
+        h = h.type(x.dtype)
+        h = self.out(h)
+        return h
+
+    def del_cache(self):
+        self.cache = None
+
+
+def timestep_embedding(timesteps, dim, max_period=10000):
+    """
+    copied from https://github.com/openai/glide-text2im/blob/9cc8e563851bd38f5ddb3e305127192cb0f02f5c/glide_text2im/nn.py#L87
+    """
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+    ).to(device=timesteps.device)
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2:
+        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
