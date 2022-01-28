@@ -255,6 +255,8 @@ class UNetModel(nn.Module):
 
             out_arch.insert(0, copy.deepcopy(out_arch[0]))
             out_layers = []
+            print([d["out_channels"] for d in out_arch])
+
             for block_dict in out_arch:
                 block_dict["in_channels"] += stack.pop()
                 print(block_dict["in_channels"])
