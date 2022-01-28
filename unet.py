@@ -227,11 +227,11 @@ class UNetModel(nn.Module):
             nn.Linear(time_embed_dim, time_embed_dim),
         )
 
-        def create_model_from_arch(architecture):
+        def create_model_from_arch(arch_in, arch_out):
             in_layers = [nn.Conv2d(3, model_channels, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))]
             stack = [model_channels]
 
-            arch_cp = copy.deepcopy(architecture)
+            arch_cp = copy.deepcopy(arch_in)
             for block_dict in arch_cp:
                 if block_dict.pop('change_size', False):
                     in_layers.append(DownResidualBlock(**block_dict))
@@ -240,26 +240,49 @@ class UNetModel(nn.Module):
 
             stack += [d['out_channels'] for d in arch_cp]
 
-            num_middle_channels = architecture[-1]["out_channels"]
+            num_middle_channels = arch_in[-1]["out_channels"]
             middle_layers = []
             middle_layers.append(ResidualBlock(num_middle_channels, num_middle_channels, False))
             middle_layers.append(AttentionBlock(channels=num_middle_channels, num_head_channels=64, encoder_channels=512))
             middle_layers.append(ResidualBlock(num_middle_channels, num_middle_channels, False))
 
-            out_arch = [{
-                'in_channels': d['out_channels'],
-                'out_channels': d['in_channels'],
-                'attn': d['attn'] or (i < 10),
-                'change_size': 'change_size' in d and d['change_size']
-            } for i, d in enumerate(reversed(architecture))]
+            # last_chans = arch_in[-1]["out_channels"]
+            # ds = 8
+            # chan_scale = 4
+            # for block in arch_in[::-1]:
+            #     change_size = block.get('change_size', False)
+            #     in_channels = last_chans + block['out_channels']
+            #     if not change_size:
+            #         out_layers.append(ResidualBlock(in_channels, 192*chan_scale, attn=(ds in [2, 4, 8])))
+            #         last_chans = 192*chan_scale
+            #     else:
+            #         out_layers.append(
+            #             nn.Sequential(
+            #                 ResidualBlock(in_channels, 192*chan_scale, attn=(ds in [2, 4, 8])),
+            #                 UpResidualBlock(192*chan_scale, 192*chan_scale, attn=False)
+            #             )
+            #         )
+            #         last_chans = 192*chan_scale
+            #         chan_scale -= 1
+            #         ds = ds // 2
+            #
+            # out_layers.extend([
+            #     ResidualBlock(192+last_chans, 192, attn=False),
+            #     nn.Conv2d(192, 6, kernel_size=(3,3), stride=(1,1), padding=(1,1)),
+            # ])
 
-            out_arch.insert(0, copy.deepcopy(out_arch[0]))
+
+
+            # out_arch = [{
+            #     'in_channels': d['out_channels'],
+            #     'out_channels': d['in_channels'],
+            #     'attn': d['attn'] or (i < 10),
+            #     'change_size': 'change_size' in d and d['change_size']
+            # } for i, d in enumerate(reversed(architecture))]
+        #
             out_layers = []
-            print([d["out_channels"] for d in out_arch])
-
-            for block_dict in out_arch:
+            for i, block_dict in enumerate(reversed(out_arch)):
                 block_dict["in_channels"] += stack.pop()
-                print(block_dict["in_channels"])
                 if block_dict.pop('change_size', False):
                     a = [ResidualBlock(**block_dict)]
                     block_dict["in_channels"] = block_dict["out_channels"]
@@ -270,7 +293,7 @@ class UNetModel(nn.Module):
                     out_layers.append(ResidualBlock(**block_dict))
 
             return in_layers, middle_layers, out_layers
-
+        #
         in_arch = [
             {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
             {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
@@ -289,7 +312,26 @@ class UNetModel(nn.Module):
             {'in_channels': 4 * model_channels, 'out_channels': 4 * model_channels, 'attn': True},
         ]
 
-        in_layers, middle_layers, out_layers = create_model_from_arch(in_arch)
+        out_arch = [
+            {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
+            {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
+            {'in_channels': model_channels, 'out_channels': model_channels, 'attn': False},
+            {'in_channels': 2 * model_channels, 'out_channels': model_channels, 'attn': False},
+            {'in_channels': 2 * model_channels, 'out_channels': 2 * model_channels, 'attn': True, 'change_size': True},
+            {'in_channels': 2 * model_channels, 'out_channels': 2 * model_channels, 'attn': True},
+            {'in_channels': 2 * model_channels, 'out_channels': 2 * model_channels, 'attn': True},
+            {'in_channels': 3 * model_channels, 'out_channels': 2 * model_channels, 'attn': True},
+            {'in_channels': 3 * model_channels, 'out_channels': 3 * model_channels, 'attn': True, 'change_size': True},
+            {'in_channels': 3 * model_channels, 'out_channels': 3 * model_channels, 'attn': True},
+            {'in_channels': 3 * model_channels, 'out_channels': 3 * model_channels, 'attn': True},
+            {'in_channels': 4 * model_channels, 'out_channels': 3 * model_channels, 'attn': True},
+            {'in_channels': 4 * model_channels, 'out_channels': 4 * model_channels, 'attn': True, 'change_size': True},
+            {'in_channels': 4 * model_channels, 'out_channels': 4 * model_channels, 'attn': True},
+            {'in_channels': 4 * model_channels, 'out_channels': 4 * model_channels, 'attn': True},
+            {'in_channels': 4 * model_channels, 'out_channels': 4 * model_channels, 'attn': True},
+        ]
+
+        in_layers, middle_layers, out_layers = create_model_from_arch(in_arch, out_arch)
 
         self.in_layers = nn.Sequential(*in_layers)
         self.middle_layers = nn.Sequential(*middle_layers)
