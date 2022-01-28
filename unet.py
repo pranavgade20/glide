@@ -75,15 +75,16 @@ class ResidualBlock(nn.Module):
         :param time_emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
-        h = self.group_norm(self.in_layers(x))
+        h = self.in_layers(x)
 
         emb_out = self.emb_layers(time_emb)[:, :, None, None]
         if self.use_scale_shift_norm:
             scale, shift = torch.chunk(emb_out, 2, dim=1)
-            h = h * (1 + scale) + shift
+            h = self.group_norm(h) * (1 + scale) + shift
+            h = self.out_layers(h)
         else:
             h = h + emb_out
-        h = self.out_layers(h)
+            h = self.out_layers(self.group_norm(h))
         if self.in_channels != self.out_channels:
             x = self.skip_connection(x)
         ret = x + h
