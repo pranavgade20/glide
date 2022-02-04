@@ -395,19 +395,23 @@ class Text2Im(UNetModel):
     def forward(self, x, timesteps, tokens, mask):
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        
         if self.xf_width:
             text_outputs = self.get_text_emb(tokens, mask)
             xf_proj, xf_out = text_outputs["xf_proj"], text_outputs["xf_out"]
             emb = emb + xf_proj.to(emb)
         else:
             xf_out = None
+
         h = x.type(self.dtype)
         for module in self.in_layers:
             h = module(h, emb, xf_out)
             hs.append(h)
+        
 
         for module in self.middle_layers:
             h = module(h, emb, xf_out)
+        return h
 
         for module in self.out_layers:
             h = torch.cat([h, hs.pop()], dim=1)
