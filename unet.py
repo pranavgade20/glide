@@ -7,6 +7,14 @@ import torch.nn.functional as F
 # import torch.optim as optim
 import transformer
 
+def convert_module_to_f16(l):
+    """
+    Convert primitive modules to float16.
+    """
+    if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+        l.weight.data = l.weight.data.half()
+        if l.bias is not None:
+            l.bias.data = l.bias.data.half()
 
 class ResidualBlock(nn.Module):
     """
@@ -54,6 +62,8 @@ class ResidualBlock(nn.Module):
                 2 * self.out_channels if self.use_scale_shift_norm else self.out_channels
             ),
         )
+
+        # self.group_norm = normalization(self.out_channels, swish=0.0 if use_scale_shift_norm else 1.0),
         self.group_norm = nn.GroupNorm(num_groups=32, num_channels=self.out_channels, eps=1e-5)
         self.out_layers = nn.Sequential(
             nn.SiLU(),
@@ -68,6 +78,7 @@ class ResidualBlock(nn.Module):
             self.attention_layer = AttentionBlock(channels=out_channels, num_head_channels=64, encoder_channels=512)
 
     def forward(self, x, time_emb, text_emb):
+        self._emb =(time_emb, text_emb)
         """
         Apply the block to a Tensor, conditioned on a timestep embedding.
 
@@ -77,7 +88,10 @@ class ResidualBlock(nn.Module):
         """
         h = self.in_layers(x)
 
-        emb_out = self.emb_layers(time_emb)[:, :, None, None]
+        # emb_out = self.emb_layers(time_emb)[:, :, None, None]
+        emb_out = self.emb_layers(time_emb).type(h.dtype)
+        while len(emb_out.shape) < len(h.shape):
+            emb_out = emb_out[..., None]
         if self.use_scale_shift_norm:
             scale, shift = torch.chunk(emb_out, 2, dim=1)
             h = self.group_norm(h) * (1 + scale) + shift
@@ -357,9 +371,9 @@ class Text2Im(UNetModel):
         self.token_embedding = nn.Embedding(self.tokenizer.n_vocab, xf_width)
         self.transformer_proj = nn.Linear(xf_width, 4 * self.model_channels)
 
-        self.cache_text_emb = False
+        self.cache_text_emb = True
         self.cache = None
-        self.dtype = torch.float32
+        self.dtype = torch.float16
 
     def get_text_emb(self, tokens, mask):
         """from https://github.com/openai/glide-text2im/blob/9cc8e563851bd38f5ddb3e305127192cb0f02f5c/glide_text2im/text2im_model.py#L89"""
@@ -424,6 +438,17 @@ class Text2Im(UNetModel):
     def del_cache(self):
         self.cache = None
 
+    def convert_to_fp16(self):
+        self.in_layers.apply(convert_module_to_f16)
+        self.middle_layers.apply(convert_module_to_f16)
+        self.out_layers.apply(convert_module_to_f16)
+        if self.xf_width:
+            self.transformer.apply(convert_module_to_f16)
+            self.transformer_proj.to(torch.float16)
+            self.token_embedding.to(torch.float16)
+            self.positional_embedding.to(torch.float16)
+            if self.xf_padding:
+                self.padding_embedding.to(torch.float16)
 
 def timestep_embedding(timesteps, dim, max_period=10000):
     """
